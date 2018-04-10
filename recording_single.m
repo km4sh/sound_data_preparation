@@ -16,7 +16,6 @@ function recording_single(filename, outfile)
     while (~isDone(fWave))
         step(fPlayer, step(fWave));
         step(fWriter, step(audioRec));
-        
     end
     release(fWave);
     release(fPlayer);
