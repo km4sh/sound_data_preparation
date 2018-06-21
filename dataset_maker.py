@@ -4,24 +4,29 @@ import glob
 import time
 import numpy as np
 import soundfile as sf
-from vad import VAD
+import random
+import string
 from functools import reduce
 from math import hypot
+from math import isnan
 
-filePath = '/seagate2t/simon/kawaii/data/orig'
-noisePath = '/seagate2t/simon/kawaii/data/busesnoise.wav'
-origPath = '/seagate2t/simon/kawaii/data/show_orig.hdf5'
-savePath = '/seagate2t/simon/kawaii/data/fix/fix_show_allsnr.hdf5'
-rirPath = '/seagate2t/simon/kawaii/data/multi_sources/ms_rir.h5'
-filePathes = glob.glob(filePath+'/**/*.wav', recursive=True)
+cleanInput = '/seagate2t/simon/kawaii/data/orig'
+noiseInput = '/seagate2t/simon/kawaii/data/busesnoise.wav'
+labelOutput = '/seagate2t/simon/kawaii/data/jun13_orig.hdf5'
+datasetOutput = '/seagate2t/simon/kawaii/data/jun13_noisy.hdf5'
+rirInput = '/seagate2t/simon/kawaii/data/rir/ms_rir.h5'
+previewPath = '/seagate2t/simon/kawaii/data/preview/'
 
-rirSet = h5py.File(rirPath, 'r')
-origFile = h5py.File(origPath, 'w', libver='latest', swmr=True)
-saveFile = h5py.File(savePath, 'w', libver='latest', swmr=True)
-noise, sampleRate = sf.read(noisePath)
+cleanInputes = glob.glob(cleanInput+'/**/*.wav', recursive=True)
+
+rirSet = h5py.File(rirInput, 'r')
+labelFile = h5py.File(labelOutput, 'w', libver='latest', swmr=True)
+datasetFile = h5py.File(datasetOutput, 'w', libver='latest', swmr=True)
+noise, sampleRate = sf.read(noiseInput)
 lenNoise = len(noise)
 
 print('+{0:->15}+{1:-<30}+'.format('-', '-'))
+
 
 for room in list(rirSet.keys()):
     try:
@@ -44,7 +49,9 @@ for room in list(rirSet.keys()):
         distance = reduce(lambda x, y: hypot(x, y), vector)
         theta = np.arccos(vector[2]/distance)*180/np.pi
         phi = np.arccos(vector[0]/(distance*np.sin(theta)))*180/np.pi
-        curRoom = saveFile.create_group(str(roomSize))
+        if(isnan(phi) or isnan(theta)):
+            continue
+        curRoom = datasetFile.create_group(str(roomSize))
         print('|{0:>15}|{1:<30.2f}|'.format('volume', volume))
         print('|{0:>15}|{1:<30.2f}|'.format('angle', angle))
         print('|{0:>15}|{1:<30.2f}|'.format('distance', distance))
@@ -53,56 +60,56 @@ for room in list(rirSet.keys()):
         print('|{0:>15}|{1:<30.2f}|'.format('', theta))
         print('|{0:>15}|{1:<30.2f}|'.format('', phi))
         print('+{0:->15}+{1:-<30}+'.format('-', '-'))
-        for wavPath in filePathes:
+
+        for wavInput in cleanInputes:
             t = time.time()
-            head, fileName = os.path.split(wavPath)
-
-            clean, sr = sf.read(wavPath)
-
+            head, fileName = os.path.split(wavInput)
+            clean, sr = sf.read(wavInput)
+            clean = clean
             maxi = max(abs(clean))
-            clean = [samp*(0.99/maxi) for samp in clean]                     # magnitude normalization.
+            clean = [samp*(0.5/maxi) for samp in clean]                     # magnitude normalization.
+            engClean = np.mean(np.square(clean))
 
             noiseExt = np.resize(noise, len(clean))
 
-            vad = VAD(np.asarray(clean[19960521:19960521+360*sr]), sr, threshold=0.95)
-            ratio = list(vad).count(1)/len(vad)
-            magWave = np.sum(np.square(clean))/(ratio*len(clean))
-            # print(ratio, len(clean[19960521:19960521+120*sr]), len(vad), list(vad).count(1))
             print('|{0:>15}|{1:<30}|'.format('file name', fileName))
-            print('|{0:>15}|{1:<30.4f}|'.format('vad ratio', ratio))
             print('|{0:>15}|{1:<30}|'.format('conv', 'start'))
 
             fakeMic1 = np.convolve(conv1, clean)
             fakeMic2 = np.convolve(conv2, clean)
 
-            maxi = max(abs(fakeMic1))
-            fakeMic1 = [samp*(0.99/maxi) for samp in fakeMic1]                     # magnitude normalization.
-            maxi = max(abs(fakeMic2))
-            fakeMic2 = [samp*(0.99/maxi) for samp in fakeMic2]                     # magnitude normalization.
+            engFakeMic = np.mean(np.square(fakeMic1))
+            scaleRatio = np.sqrt(engClean/engFakeMic)
+            print('|{0:>15}|{1:<30.4f}|'.format('clean ratio', scaleRatio))
+
+            fakeMic1 = [samp*scaleRatio for samp in fakeMic1]                     # magnitude normalization.
+            fakeMic2 = [samp*scaleRatio for samp in fakeMic2]                     # magnitude normalization.
 
             noiseMic1 = np.convolve(nConv1, noiseExt)
             noiseMic2 = np.convolve(nConv2, noiseExt)
+            engNoiseMic = np.mean(np.square(noiseMic1))
 
             print('|{0:>15}|{1:<30}|'.format('conv', 'finished'))
 
-            magFakeMic = np.sum(np.square(fakeMic1))/(ratio*len(fakeMic1))
-            magNoiseMic = np.mean(np.square(noiseMic1))
-
-            for snr in [-15, -6, -3, 0, 3, 6, 15]:
-                noiseMic1 = [p*(magFakeMic/(magNoiseMic*10**(snr/10))) for p in noiseMic1]
-                noiseMic2 = [p*(magFakeMic/(magNoiseMic*10**(snr/10))) for p in noiseMic2]
-                channel1 = np.asarray(fakeMic1) + np.asarray(noiseMic1)
-                channel2 = np.asarray(fakeMic2) + np.asarray(noiseMic2)
+            for snr in [0]:
+                snrScale = (engClean/(engNoiseMic*10**(10*(snr/3.8+0.6)/10)))
+                scaledNoise1 = [p*snrScale for p in noiseMic1]
+                scaledNoise2 = [p*snrScale for p in noiseMic2]
+                channel1 = np.asarray(fakeMic1) + np.asarray(scaledNoise1)
+                channel2 = np.asarray(fakeMic2) + np.asarray(scaledNoise2)
                 stereo = np.vstack((channel1, channel2)).T
                 print('+{0:->15}+{1:-<30}+'.format('-', '-'))
-                print('|{0:>15}|{1:<30}|'.format('scale ratio', (magFakeMic/(magNoiseMic*10**(snr/10)))))
+                print('|{0:>15}|{1:<30}|'.format('noisy ratio', snrScale))
                 print('|{0:>15}|{1:<30}|'.format('snr '+str(snr), 'rebuild finished'))
                 flag = 0
                 salt = ''.join(random.sample(string.ascii_letters + string.digits, 16))
+                print('|{0:>15}|{1:<30}|'.format('salt', salt))
                 curDset = curRoom.create_dataset(salt, data=stereo)
+                sf.write(previewPath+'label.wav', clean[:sr*5], sr)
+                sf.write(previewPath+str(snr)+'noisy.wav', stereo[:sr*5], sr)
                 curDset.attrs.create('mono', fileName, dtype=h5py.special_dtype(vlen=str))
-                curDset.attrs.create('volume', volume, dtype=float)
-                curDset.attrs.create('angle', angle, dtype=float)
+                curDset.attrs.create('volume', theta, dtype=float)
+                curDset.attrs.create('angle', phi, dtype=float)
                 curDset.attrs.create('distance', distance, dtype=float)
                 curDset.attrs.create('theta', theta, dtype=float)
                 curDset.attrs.create('phi', phi, dtype=float)
@@ -114,17 +121,17 @@ for room in list(rirSet.keys()):
                 curDset.attrs.create('noise angle', noiseAngle, dtype=float)
                 flag = 1
             try:
-                assert origFile[curDset.attrs['mono']].shape[0] == stereo.shape[0]
+                assert labelFile[curDset.attrs['mono']].shape[0] == stereo.shape[0]
             except AssertionError:
                 try:
                     clean.extend(np.zeros(stereo.shape[0] - len(clean)))
-                    origFile[curDset.attrs['mono']] = clean
+                    labelFile[curDset.attrs['mono']] = clean
                 except:
                     import ipdb; ipdb.set_trace()
             except:
                 clean.extend(np.zeros(stereo.shape[0] - len(clean)))
-                origFile.create_dataset(fileName, data=clean)
-                assert origFile[curDset.attrs['mono']].shape[0] == stereo.shape[0]
+                labelFile.create_dataset(fileName, data=clean)
+                assert labelFile[curDset.attrs['mono']].shape[0] == stereo.shape[0]
             t = time.time() - t
             print('+{0:->15}+{1:-<30}+'.format('-', '-'))
             print('|{0:>15}|{1:<30.2f}|'.format('time', t))
@@ -132,15 +139,15 @@ for room in list(rirSet.keys()):
     except KeyboardInterrupt:
         if(flag == 0):
             del curRoom[fileName]
-            print('|{0:>15}|{1:<30.2f}|'.format(fileName, 'dSet deleted'))
+            print('|{0:>15}|{1:<30}|'.format(fileName, 'dSet deleted'))
             print('+{0:->15}+{1:-<30}+'.format('-', '-'))
         if(list(curRoom.keys())==[]):
-            del saveFile[str(roomSize)]
-            print('|{0:>15}|{1:<30.2f}|'.format(str(roomSize), 'room deleted'))
+            del datasetFile[str(roomSize)]
+            print('|{0:>15}|{1:<30}|'.format(str(roomSize), 'room deleted'))
             print('+{0:->15}+{1:-<30}+'.format('-', '-'))
         break
-saveFile.swmr_mode = True
-saveFile.flush()
-saveFile.close()
-origFile.close()
+datasetFile.swmr_mode = True
+datasetFile.flush()
+datasetFile.close()
+labelFile.close()
 print('+{0:->15}-{1:-<30}+'.format(' all ', ' finished '))
